@@ -623,14 +623,16 @@ function SchoolEngine() {
     // exam proctors behave like escorts (busy at that period)
     const events = (doc.events || []).map(ev => {
       const extra = [];
-      if (ev.exam) (ev.exam.rooms || []).forEach(r => (r.proctors || []).forEach(pr => extra.push({ period: +pr.period, teacherIds: pr.teacherIds || [] })));
+      if (ev.exam) (ev.exam.rooms || []).concat((ev.exam.extra || {}).rooms || []).forEach(r => (r.proctors || []).forEach(pr => extra.push({ period: +pr.period, teacherIds: pr.teacherIds || [] })));
       if (ev.workshop) {
         (ev.workshop.slots || []).forEach(sl => (sl.assign || []).forEach(a => { if ((a.escortIds || []).length) extra.push({ period: +sl.period, teacherIds: a.escortIds }); }));
         (ev.workshop.stations || []).forEach(st => { if (st.teacherId) (ev.workshop.slots || []).forEach(sl => extra.push({ period: +sl.period, teacherIds: [st.teacherId] })); });
       }
       return extra.length ? Object.assign({}, ev, { escorts: (ev.escorts || []).concat(extra) }) : ev;
     });
-    const examRoomAt = (rid, p) => events.find(ev => inRange(ev, p) && ((ev.exam && (ev.exam.rooms || []).some(r => r.roomId === rid)) || (ev.workshop && (ev.workshop.stations || []).some(st => st.roomId === rid)))) || null;
+    // an extra-time room is taken in the periods after the exam (ev.exam.extra.periods), not during it
+    const extraAt = (ev, rid, p) => !!(ev.exam && ev.exam.extra && (ev.exam.extra.periods || []).indexOf(p + fp) >= 0 && (ev.exam.extra.rooms || []).some(r => r.roomId === rid));
+    const examRoomAt = (rid, p) => events.find(ev => (inRange(ev, p) && ((ev.exam && (ev.exam.rooms || []).some(r => r.roomId === rid)) || (ev.workshop && (ev.workshop.stations || []).some(st => st.roomId === rid)))) || extraAt(ev, rid, p)) || null;
     const legacyAway = new Set((doc.absentClasses || []).map(x => x.classId));
     const N = {
       absences, events, examRoomAt,
@@ -989,7 +991,29 @@ function SchoolEngine() {
   };
 
   // ---------- exams: rooms + proctors ----------
-  // ev: {id,title,from,to,classIds,groups, exam:{students, perRoom, ratio, seatPct, roomTypes:[...], rooms:[{roomId,students,proctors:[{period,teacherIds}]}]}}
+  // The periods (display numbers) that an extra-time session of `minutes` runs into after period `to`.
+  // Uses the bell times when the school has them (a short extra time can fit inside the break), else 45-minute periods.
+  E.extraPeriods = function (M, d, to, minutes) {
+    const fp = M.cfg.firstPeriod || 0;
+    const last = (M.cfg.periods[d] || M.P) + fp - 1;
+    const mins = Math.max(1, +minutes || 30);
+    const tm = s => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || "").trim()); return m ? +m[1] * 60 + +m[2] : null; };
+    const times = M.cfg.times || [];
+    const startOf = n => { const t = times[n - fp]; return t ? tm(t[0]) : null; };
+    const endOf = n => { const t = times[n - fp]; return t ? tm(t[1]) : null; };
+    const end0 = endOf(+to);
+    const out = [];
+    for (let n = +to + 1; n <= last; n++) {
+      const s = startOf(n);
+      if (end0 != null && s != null) { if (s < end0 + mins) out.push(n); else break; }
+      else if (out.length < Math.ceil(mins / 45)) out.push(n);
+      else break;
+    }
+    return out;
+  };
+  // ev: {id,title,from,to,classIds,groups, exam:{students, perRoom, ratio, seatPct, roomTypes:[...], rooms:[{roomId,students,proctors:[{period,teacherIds}]}],
+  //      extra?:{students, minutes, roomId?, periods:[n], rooms:[{roomId,students,proctors:[...]}]}}}
+  // extra = students with extra time: when the exam ends they move to the extra-time room(s) and continue there.
   // Returns a plan that keeps what already works (rooms/proctors) and adds what is missing.
   E.planExam = function (M, placements, daily, d, ev, weekLoad) {
     const fp = M.cfg.firstPeriod || 0;
@@ -1001,12 +1025,17 @@ function SchoolEngine() {
     base.events = (base.events || []).filter(e => e.id !== ev.id).concat([Object.assign({}, ev, { exam: null, escorts: ev.escorts || [] })]);
     base.changes = base.changes || {};
     const data = M.data;
-    const seatsOf = r => Math.floor(Math.min(M.capOf(r), 400) * (ex.seatPct || 100) / 100);
+    // maxPerRoom: the most examinees the school puts in one room, whatever the room's size.
+    // With it, a room whose size is not recorded can be used too (it is assumed to hold that many).
+    const roomCap = +ex.maxPerRoom > 0 ? +ex.maxPerRoom : Infinity;
+    const seatsOf = r => Math.floor(Math.min(M.capOf(r), 400, roomCap) * (ex.seatPct || 100) / 100);
     const notes = [];
     const changes = [];
     // ----- rooms -----
     const used = ps.map(p => E.roomsInUse(M, placements, base, d, p));
-    const candidates = data.rooms.filter(r => ex.roomTypes.indexOf(r.type) >= 0 && M.capOf(r) < Infinity && seatsOf(r) > 0 && M.roomFor(r, [], "event"));
+    const candidates = data.rooms.filter(r => ex.roomTypes.indexOf(r.type) >= 0 && (M.capOf(r) < Infinity || roomCap < Infinity) && seatsOf(r) > 0 && M.roomFor(r, [], "event"));
+    // the examined classes' own rooms are free during the exam and the students know them: use them first
+    const ownRooms = new Set((ev.classIds || []).concat(ev.forClasses || []).map(id => { const ci = M.cIdx.get(id); return ci === undefined ? null : data.classes[ci].homeRoom; }).filter(Boolean));
     const prevRooms = new Map(((ev.exam || {}).rooms || []).map(r => [r.roomId, r]));
     const isFree = r => used.every(u => !u.has(r.id));
     const movesFor = r => { // can every lesson in room r during the exam move elsewhere?
@@ -1031,8 +1060,9 @@ function SchoolEngine() {
       const prev = candidates.find(r => prevRooms.has(r.id) && !usedIds.has(r.id));
       if (prev) return prev;
       for (const tier of [true, false]) {
-        const pool = candidates.filter(r => !usedIds.has(r.id) && isFree(r) === tier);
+        let pool = candidates.filter(r => !usedIds.has(r.id) && isFree(r) === tier);
         if (!pool.length) continue;
+        const own = pool.filter(r => ownRooms.has(r.id)); if (own.length) pool = own;
         const fit = pool.filter(r => seatsOf(r) >= remaining).sort((a, b) => seatsOf(a) - seatsOf(b));
         if (fit.length) return fit[0];
         const freeSeats = pool.reduce((a, r) => a + seatsOf(r), 0);
@@ -1064,48 +1094,119 @@ function SchoolEngine() {
     const chosenAt = ps.map(() => new Set());
     let shortage = 0;
     const releasable = []; // lessons we may cancel to free a teacher
+    // proctors for one room at one period. `chosen` = the teachers already taken at that period.
+    const pickProctors = (room, p, chosen, need, prevIds, prevRoomIds, stayIds) => {
+      const busy = E.busyTeachersAt(M, placements, base, d * M.P + p);
+      const cands = [];
+      data.teachers.forEach((t, ti) => {
+        if (busy.has(t.id) || chosen.has(t.id) || M.tOff[ti][d * M.P + p] || N0.unavailableAt(t.id, p)) return;
+        let score = 0; const why = [];
+        const pr = presentAt.get(t.id) || [];
+        if (freedBy.has(t.id) && freedBy.get(t.id).has(p)) { score += 7; why.push("השיעור שלו/ה בוטל בגלל הבחינה"); }
+        else if (pr.some(x => x < p) && pr.some(x => x > p)) { score += 5; why.push("בחלון"); }
+        else if (pr.length || freedBy.has(t.id)) { score += 3; why.push("נמצא/ת בבית הספר"); }
+        else { score -= 6; why.push("לא עובד/ת היום"); }
+        const dutyNow = dayAll.find(Y => Y.duty && Y.teacherId === t.id && Y.p === p && Y.status === "normal");
+        if (dutyNow) { if (/ישיב|מליא|הנהלה|תורנ/.test(dutyNow.group.subject)) score -= 2; else { score += 2; why.push("בשעת " + dutyNow.group.subject); } }
+        if (prevIds.indexOf(t.id) >= 0) { score += 3; why.push("כבר שובץ/ה"); }
+        if (prevRoomIds.indexOf(t.id) >= 0) score += 1.5;
+        if (stayIds && stayIds.indexOf(t.id) >= 0) { score += 4; why.push("השגיח/ה בבחינה"); }
+        score -= (load[t.id] || 0) * 1.2;
+        cands.push({ id: t.id, score, why: why.join(", ") });
+      });
+      cands.sort((a, b) => b.score - a.score);
+      const picked = [];
+      for (const c of cands) { if (picked.length >= need) break; if (c.score < -2 && picked.length >= 1) break; picked.push(c); }
+      // still short: free a teacher by releasing a lesson at the edge of its classes' day
+      while (picked.length < need) {
+        const L = dayAll.find(x => x.p === p && x.status === "normal" && x.req.groups.length === 1 && !chosen.has(x.teacherId) && !picked.some(q => q.id === x.teacherId) && releasable.indexOf(x) < 0 && E.isEdgeLesson(dayAll, x));
+        if (!L) break;
+        releasable.push(L);
+        changes.push({ op: "cancel", date: null, pid: L.pid, group: L.gi, release: true });
+        picked.push({ id: L.teacherId, score: 0, why: "שוחרר/ה משיעור בקצה היום" });
+      }
+      if (picked.length < need) shortage += need - picked.length;
+      picked.forEach(c => { chosen.add(c.id); load[c.id] = (load[c.id] || 0) + 1; });
+      room.proctors.push({ period: p + fp, teacherIds: picked.map(c => c.id), why: picked.map(c => c.why) });
+    };
     rooms.forEach(room => {
       const need = Math.max(ex.perRoom || 1, Math.ceil(room.students / (ex.ratio || 30)));
       const prev = prevRooms.get(room.roomId);
       ps.forEach((p, k) => {
-        const busy = E.busyTeachersAt(M, placements, base, d * M.P + p);
         const prevIds = prev ? ((prev.proctors || []).find(x => +x.period === p + fp) || {}).teacherIds || [] : [];
         const prevRoomIds = k > 0 ? ((room.proctors.find(x => x.period === ps[k - 1] + fp) || {}).teacherIds || []) : [];
-        const cands = [];
-        data.teachers.forEach((t, ti) => {
-          if (busy.has(t.id) || chosenAt[k].has(t.id) || M.tOff[ti][d * M.P + p] || N0.unavailableAt(t.id, p)) return;
-          let score = 0; const why = [];
-          const pr = presentAt.get(t.id) || [];
-          if (freedBy.has(t.id) && freedBy.get(t.id).has(p)) { score += 7; why.push("השיעור שלו/ה בוטל בגלל הבחינה"); }
-          else if (pr.some(x => x < p) && pr.some(x => x > p)) { score += 5; why.push("בחלון"); }
-          else if (pr.length || freedBy.has(t.id)) { score += 3; why.push("נמצא/ת בבית הספר"); }
-          else { score -= 6; why.push("לא עובד/ת היום"); }
-          const dutyNow = dayAll.find(Y => Y.duty && Y.teacherId === t.id && Y.p === p && Y.status === "normal");
-          if (dutyNow) { if (/ישיב|מליא|הנהלה|תורנ/.test(dutyNow.group.subject)) score -= 2; else { score += 2; why.push("בשעת " + dutyNow.group.subject); } }
-          if (prevIds.indexOf(t.id) >= 0) { score += 3; why.push("כבר שובץ/ה"); }
-          if (prevRoomIds.indexOf(t.id) >= 0) score += 1.5;
-          score -= (load[t.id] || 0) * 1.2;
-          cands.push({ id: t.id, score, why: why.join(", ") });
-        });
-        cands.sort((a, b) => b.score - a.score);
-        const picked = [];
-        for (const c of cands) { if (picked.length >= need) break; if (c.score < -2 && picked.length >= 1) break; picked.push(c); }
-        // still short: free a teacher by releasing a lesson at the edge of its classes' day
-        while (picked.length < need) {
-          const L = dayAll.find(x => x.p === p && x.status === "normal" && x.req.groups.length === 1 && !chosenAt[k].has(x.teacherId) && !picked.some(q => q.id === x.teacherId) && releasable.indexOf(x) < 0 && E.isEdgeLesson(dayAll, x));
-          if (!L) break;
-          releasable.push(L);
-          changes.push({ op: "cancel", date: null, pid: L.pid, group: L.gi, release: true });
-          picked.push({ id: L.teacherId, score: 0, why: "שוחרר/ה משיעור בקצה היום" });
-        }
-        if (picked.length < need) shortage += need - picked.length;
-        picked.forEach(c => { chosenAt[k].add(c.id); load[c.id] = (load[c.id] || 0) + 1; });
-        room.proctors.push({ period: p + fp, teacherIds: picked.map(c => c.id), why: picked.map(c => c.why) });
+        pickProctors(room, p, chosenAt[k], need, prevIds, prevRoomIds);
       });
     });
+    // ----- extra time: the students who get it move to the extra-time room(s) when the exam ends -----
+    let extraOut = null;
+    const xt = ex.extra || {};
+    if (+xt.students > 0) {
+      const xMin = +xt.minutes || 30;
+      const xNums = E.extraPeriods(M, d, to, xMin);
+      const xps = xNums.map(n => n - fp);
+      const xRooms = [];
+      let left = +xt.students;
+      if (!xps.length) notes.push("תוספת הזמן (" + xMin + " דקות) לא נכנסת לשיעור נוסף (הפסקה או סוף היום) – התלמידים ממשיכים בחדרי הבחינה, בלי שיבוץ חדר נוסף.");
+      else {
+        const xUsed = xps.map(p => E.roomsInUse(M, placements, base, d, p));
+        const xFree = r => xUsed.every(u => !u.has(r.id));
+        const xReserved = xps.map(() => new Set());
+        const xMoves = r => { // can every lesson in room r during the extra time move elsewhere?
+          const mv = []; const taken = xps.map(() => new Set());
+          for (let k = 0; k < xps.length; k++) {
+            const L = xUsed[k].get(r.id); if (!L) continue;
+            if (L.exam) return null;
+            const alt = E.freeRoomFor(M, placements, base, d, L, new Set([r.id].concat(Array.from(taken[k])).concat(Array.from(xReserved[k]))));
+            if (!alt) return null;
+            taken[k].add(alt.id); mv.push({ L, alt, k });
+          }
+          return mv;
+        };
+        const mainIds = new Set(rooms.map(r => r.roomId));
+        const prevX = new Map((((ev.exam || {}).extra || {}).rooms || []).map(r => [r.roomId, r]));
+        const want = xt.roomId && M.rIdx.has(xt.roomId) ? data.rooms[M.rIdx.get(xt.roomId)] : null;
+        const pool0 = candidates.slice(); if (want && pool0.indexOf(want) < 0) pool0.push(want);
+        // order of preference: the room the user chose, a room already planned, an exam room that stays free
+        // ("continue in the same room"), another free room, and only then rooms whose lessons must move out
+        const tierOf = r => (want && r.id === want.id ? 0 : prevX.has(r.id) ? 1 : xFree(r) ? (mainIds.has(r.id) ? 2 : 3) : (mainIds.has(r.id) ? 4 : 5));
+        const xTaken = new Set();
+        for (let guard = 0; guard < pool0.length && left > 0; guard++) {
+          const pool = pool0.filter(r => !xTaken.has(r.id)); if (!pool.length) break;
+          const best = Math.min.apply(null, pool.map(tierOf));
+          const tier = pool.filter(r => tierOf(r) === best);
+          const fit = tier.filter(r => seatsOf(r) >= left).sort((a, b) => seatsOf(a) - seatsOf(b));
+          const r = fit[0] || tier.sort((a, b) => seatsOf(b) - seatsOf(a))[0];
+          xTaken.add(r.id);
+          let mv = [];
+          if (!xFree(r)) { mv = xMoves(r); if (!mv) continue; }
+          const st = Math.min(seatsOf(r), left); left -= st;
+          xRooms.push({ roomId: r.id, students: st, proctors: [] });
+          xps.forEach((p, k) => xReserved[k].add(r.id));
+          mv.forEach(m => { changes.push({ op: "daily_room", date: null, pid: m.L.pid, group: m.L.gi, roomId: m.alt.id }); xReserved[m.k].add(m.alt.id); base.changes[m.L.pid + "|" + m.L.gi] = Object.assign({}, base.changes[m.L.pid + "|" + m.L.gi] || { type: "room" }, { roomId: m.alt.id }); });
+        }
+        if (want && !xRooms.some(r => r.roomId === want.id)) notes.push("החדר שנבחר לתוספת זמן (" + want.name + ") תפוס בשעה הזאת ואי אפשר לפנות אותו – שובץ חדר אחר.");
+        if (left > 0) notes.push("חסרים מקומות לתוספת זמן ל-" + left + " תלמידים: אין חדר פנוי מתאים בשעה שאחרי הבחינה.");
+        // the proctor who finished the exam is the natural one to stay with the extra-time students
+        const lastMain = []; rooms.forEach(r => { const pr = r.proctors.find(x => x.period === to); if (pr) pr.teacherIds.forEach(t => lastMain.push(t)); });
+        const xChosen = xps.map(() => new Set());
+        xRooms.forEach(room => {
+          const need = Math.max(ex.perRoom || 1, Math.ceil(room.students / (ex.ratio || 30)));
+          const prev = prevX.get(room.roomId);
+          xps.forEach((p, k) => {
+            const prevIds = prev ? ((prev.proctors || []).find(x => +x.period === p + fp) || {}).teacherIds || [] : [];
+            const prevRoomIds = k > 0 ? ((room.proctors.find(x => x.period === xps[k - 1] + fp) || {}).teacherIds || []) : [];
+            pickProctors(room, p, xChosen[k], need, prevIds, prevRoomIds, lastMain);
+          });
+        });
+      }
+      extraOut = { students: +xt.students, minutes: xMin, roomId: xt.roomId || null, periods: xNums, rooms: xRooms.map(r => ({ roomId: r.roomId, students: r.students, proctors: r.proctors.map(x => ({ period: x.period, teacherIds: x.teacherIds })) })), missing: Math.max(0, left) };
+    }
     if (shortage) notes.push("חסרים " + shortage + " משגיחים (שעה-חדר). אפשר להוסיף מורים שלא עובדים היום או לשחרר עוד שיעורים.");
-    const nextEv = Object.assign({}, ev, { exam: Object.assign({}, ex, { rooms: rooms.map(r => ({ roomId: r.roomId, students: r.students, proctors: r.proctors.map(x => ({ period: x.period, teacherIds: x.teacherIds })) })) }) });
-    return { event: nextEv, rooms, changes, notes, seats: ex.students - Math.max(0, remaining), shortage: { students: Math.max(0, remaining), proctors: shortage } };
+    const exOut = Object.assign({}, ex, { rooms: rooms.map(r => ({ roomId: r.roomId, students: r.students, proctors: r.proctors.map(x => ({ period: x.period, teacherIds: x.teacherIds })) })) });
+    if (extraOut) exOut.extra = { students: extraOut.students, minutes: extraOut.minutes, roomId: extraOut.roomId, periods: extraOut.periods, rooms: extraOut.rooms, planned: true }; else delete exOut.extra;
+    const nextEv = Object.assign({}, ev, { exam: exOut });
+    return { event: nextEv, rooms, extra: extraOut, changes, notes, seats: ex.students - Math.max(0, remaining), shortage: { students: Math.max(0, remaining), proctors: shortage, extraStudents: extraOut ? extraOut.missing : 0 } };
   };
 
   // why can't a lesson be placed? (static reasons only)

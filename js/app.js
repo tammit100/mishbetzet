@@ -351,7 +351,153 @@ const EXAM_KINDS = ["בחינה", "מועד ב׳", "בגרות"];
 const M2_PER_STUDENT = 1.25;
 function examText(ev) {
   const ex = ev.exam; if (!ex || !(ex.rooms || []).length) return "";
-  return ex.rooms.map(r => rName(r.roomId) + " (" + r.students + " תלמידים): " + (r.proctors || []).map(p => "שיעור " + p.period + " – " + (p.teacherIds.length ? p.teacherIds.map(tName).join(", ") : "חסר משגיח")).join("; ")).join("\n");
+  const line = r => rName(r.roomId) + " (" + r.students + " תלמידים): " + (r.proctors || []).map(p => "שיעור " + p.period + " – " + (p.teacherIds.length ? p.teacherIds.map(tName).join(", ") : "חסר משגיח")).join("; ");
+  const x = ex.extra;
+  return ex.rooms.map(line).concat(x && (x.rooms || []).length ? x.rooms.map(r => "תוספת זמן (" + x.minutes + " דק׳) – " + line(r)) : []).join("\n");
+}
+// the extra-time part of an exam as a small table: rooms, students and proctors for the periods after the exam
+function examExtraHtml(x, cls) {
+  if (!x || !(+x.students > 0)) return "";
+  const ps = x.periods || [];
+  const head = '<div class="small" style="margin:8px 0 4px"><b>תוספת זמן</b> · ' + (+x.students) + " תלמידים · " + (+x.minutes || 30) + " דקות אחרי הבחינה</div>";
+  if (!(x.rooms || []).length) return head + '<div class="small muted">' + (x.planned ? "ממשיכים בחדרי הבחינה – תוספת הזמן לא נכנסת לשיעור נוסף, או שלא נמצא חדר פנוי." : "עוד לא שובץ חדר לתוספת הזמן.") + "</div>";
+  return head + '<div style="overflow-x:auto"><table class="' + (cls || "t small") + '"><thead><tr><th>חדר תוספת זמן</th><th>תלמידים</th>' + ps.map(n => "<th>משגיחים שעה " + n + "</th>").join("") + "</tr></thead><tbody>" +
+    x.rooms.map(r => "<tr><td>" + esc(rName(r.roomId)) + '</td><td class="num">' + (r.students || "") + "</td>" + ps.map(n => { const pr = (r.proctors || []).find(q => +q.period === n); return "<td>" + (pr && (pr.teacherIds || []).length ? esc(pr.teacherIds.map(tName).join(", ")) : '<span style="color:var(--bad)">חסר משגיח</span>') + "</td>"; }).join("") + "</tr>").join("") + "</tbody></table></div>";
+}
+// exam form: how many students get extra time, for how long, and (optionally) in which room
+function examExtraFields(ex0) {
+  const x = ex0.extra || {};
+  return '<div style="border-top:1px solid var(--line);padding-top:8px;display:grid;gap:8px"><b class="small">תוספת זמן</b><div class="fgrid"><label class="f">תלמידים עם תוספת זמן<input type="number" min="0" id="ex-xn" value="' + esc(x.students || "") + '" placeholder="0 = אין"></label><label class="f">תוספת זמן (דקות)<input type="number" min="5" step="5" id="ex-xmin" value="' + esc(x.minutes || 30) + '"></label><label class="f">חדר לתוספת זמן<select id="ex-xroom"><option value="">בחירה אוטומטית</option>' +
+    S.data.rooms.slice().sort((p, q) => p.name.localeCompare(q.name, "he", { numeric: true })).map(r => '<option value="' + r.id + '"' + (x.roomId === r.id ? " selected" : "") + ">" + esc(r.name) + (r.capacity ? " (" + r.capacity + ")" : "") + "</option>").join("") +
+    '</select></label></div><p class="muted small" style="margin:0">בסיום הבחינה התלמידים עם תוספת הזמן עוברים מחדרי הבחינה לחדר תוספת הזמן וממשיכים שם. בבחירה אוטומטית המערכת מעדיפה חדר בחינה שנשאר פנוי בשעה שאחרי, אחריו חדר פנוי אחר, ומשבצת שם משגיח.</p></div>';
+}
+// ---------------- exam subjects ----------------
+// The timetable stores every part of a subject under its own name: theory and lab, the workshops of an arts
+// track, boys and girls. An exam is set in the subject itself, so the names are merged into a short list.
+// Each entry is [exam subject, pattern for the timetable names that belong to it]; the first match wins, so the
+// specific ones come first ("מבוא לכימיה" before "כימיה"). Advanced literature and bible count as literature and bible.
+// Maths and English stay split by level (3 / 4 / 5 יח"ל) because each level sits its own exam.
+const EXAM_SUBJECT_MAP = [
+  ["מבוא לביולוגיה", /^מבוא לביולוגיה/], ["מבוא לכימיה", /^מבוא לכימיה/], ["מבוא לפיסיקה", /^מבוא לפי[סז]יקה/],
+  ["חינוך פיננסי", /^חינוך פיננסי/], ["חינוך תעבורתי", /^חינוך תעבורתי/], ["חינוך", /^חינוך$/], ["מקהלה", /^מקהלה/],
+  ["חקר מתוקשב", /^חקר מתוקשב/], ["מדעי הטכנולוגיה", /^מדעי הטכנולוגיה/],
+  ["יחידת חקר במדעים", /חקר במד|יחי?דת חקר/],
+  ["ביוטכנולוגיה", /ביוטכ|ביוכימיה/], ["ביולוגיה", /ביולוגיה/], ["כימיה", /כימיה/], ["פיסיקה", /פי[סז]יקה/],
+  ["מדעי המחשב", /מדעי המחשב/], ["מערכות מידע / מידע ונתונים", /מערכות מידע|מידע ונתונים|מידע וידע|איתור מידע/],
+  ["פסיכולוגיה", /^פסיכולוגיה/], ["סוציולוגיה", /^סוציולוגיה/], ["מנהל וכלכלה", /מנהל וכלכלה|משאבי אנוש/], ["גיאוגרפיה", /^גי?אוגרפיה/],
+  ["תקשורת", /^תקשורת/], ["קולנוע", /^קולנוע/], ["מחול", /מחול|בלט/], ["מוסיקה", /מו[סז]יקה|הרמוניה|סולפז|קומפוזיציה/],
+  ["אמנות", /אמנות|אומנות|ציור|פיסול|צילום/], ["ערבית", /^ערבית/],
+  ["מגמת חינוך גופני", /כדורסל|פיזיולוגיה|כושר גופני|תולדות החנ|של הספורט/],
+  ["עברית", /^(עברית|לשון)/], ["ספרות", /^ספרות/], ['תנ"ך', /^תנ["״]ך/], ["היסטוריה", /^היסטוריה/], ["אזרחות", /^אזרחות/],
+];
+// timetable names that never become an exam subject, and exam subjects that are always offered
+const EXAM_SUBJECTS_HIDE = [/^א\.\s*נב/, /^אנטומיה למחול/, /^אתלטיקה/, /^בלט קלאסי/, /^(חנ["״]ג|חינוך גופני)/];
+const EXAM_SUBJECTS_ALWAYS = ["פיסיקה", "כימיה", "מדעי המחשב"];
+// merged subjects that the school does not hold exams in
+const EXAM_SUBJECTS_NO_EXAM = ["חינוך", "חינוך תעבורתי", "חינוך פיננסי", "חקר מתוקשב", "מדעי הטכנולוגיה", "יחידת חקר במדעים", "מגמת חינוך גופני", "מערכות מומחות", "מערכות מידע / מידע ונתונים", "מקהלה"];
+// the exam subject that a timetable name belongs to ("" = not an exam subject)
+function examSubjectOf(name) {
+  const s = String(name || "").trim();
+  if (!s || EXAM_SUBJECTS_HIDE.some(re => re.test(s))) return "";
+  const lv = /^(מתמטיקה|אנגלית)/.exec(s);
+  if (lv) { const m = /(?:^|\s)([345])(?:\s|$)/.exec(s); return lv[1] + (m ? " " + m[1] + ' י"ל' : ""); }
+  const hit = EXAM_SUBJECT_MAP.find(([, re]) => re.test(s));
+  return hit ? hit[0] : s;
+}
+// does the timetable name `raw` belong to the exam subject `chosen`? A joint exam ("מתמטיקה 4,5 י"ל") covers each of its levels.
+function examSubjectMatches(chosen, raw) {
+  const s = examSubjectOf(raw); if (!s || !chosen) return false;
+  if (s === chosen) return true;
+  const j = /^(\S+) (\d(?:,\d)+) י"ל$/.exec(chosen);
+  return !!j && j[2].split(",").some(l => s === j[1] + " " + l + ' י"ל');
+}
+// Suggests the exam hours from the timetable: two lessons in a row in which the examined classes are at school
+// (as many of them as possible have a lesson in both), and among those the hours in which most of them learn
+// the subject. Hour 0 is never used for an exam. Fills the hours until the user sets them.
+function examTimeSync() {
+  const hint = document.getElementById("ex-time-hint"); if (!hint) return;
+  const fs = document.getElementById("ev-exam");
+  const subj = (document.getElementById("ex-subject") || {}).value || "";
+  const ids = Array.from(document.querySelectorAll("[data-evc]")).filter(x => x.checked).map(x => x.getAttribute("data-evc"));
+  if (!fs || fs.hidden || !ids.length) { hint.hidden = true; return; }
+  const wd = weekday(S.date), first = Math.max(fp(), 1), last = S.data.config.periods[wd] + fp() - 1;
+  const pick = new Set(ids), learn = new Map(), subjAt = new Map();
+  const add = (map, n, c) => { let s = map.get(n); if (!s) map.set(n, s = new Set()); s.add(c); };
+  E.dayLessons(M, S.placements, null, wd).forEach(L => {
+    const n = L.p + fp(); if (n < first) return;
+    const mine = (L.req.classIds || []).filter(c => pick.has(c)); if (!mine.length) return;
+    mine.forEach(c => add(learn, n, c));
+    if (subj && examSubjectMatches(subj, L.group.subject)) mine.forEach(c => add(subjAt, n, c));
+  });
+  const f = document.getElementById("ev-from"), t2 = document.getElementById("ev-to");
+  const auto = f && t2 && f.dataset.auto === "1" && t2.dataset.auto === "1"; // the user has not set the hours
+  hint.hidden = false;
+  if (!learn.size) { if (auto) { f.value = ""; t2.value = ""; } hint.className = "note"; hint.textContent = "הכיתות שנבחרו לא לומדות ביום הזה (אחרי שעת אפס). קבעו את שעות הבחינה בעצמכם."; return; }
+  const at = (map, n) => map.get(n) || new Set();
+  const both = n => Array.from(at(learn, n)).filter(c => at(learn, n + 1).has(c)).length; // classes with a lesson in both hours
+  let best = first, bestKey = [-1, -1];
+  for (let n = first; n <= Math.max(first, last - 1); n++) {
+    const key = [both(n), at(subjAt, n).size + at(subjAt, n + 1).size];
+    if (key[0] > bestKey[0] || (key[0] === bestKey[0] && key[1] > bestKey[1])) { bestKey = key; best = n; }
+  }
+  const to = Math.min(best + 1, last);
+  if (auto) { f.value = best; t2.value = to; }
+  const inSubj = new Set([...at(subjAt, best), ...at(subjAt, to)]).size;
+  const all = bestKey[0] === ids.length;
+  hint.className = "note info";
+  hint.textContent = "הצעה לפי המערכת: שעות " + best + "–" + to + ". " + (all ? (ids.length === 1 ? "הכיתה לומדת" : "כל " + ids.length + " הכיתות שנבחרו לומדות") : bestKey[0] + " מתוך " + ids.length + " הכיתות שנבחרו לומדות") + " בשתי השעות האלה" +
+    (!subj ? "." : subjAt.size ? ", ו-" + inSubj + " מהן לומדות אז " + subj + ". ביום הזה המקצוע נלמד בשעות: " + Array.from(subjAt.keys()).sort((x, y) => x - y).map(n => n + " (" + at(subjAt, n).size + ")").join(", ") + "." : ". " + subj + " לא נלמד ביום הזה בכיתות האלה.");
+}
+// the short exam-subject list: what the selected classes learn (every class subject when nothing is selected).
+// Staff duties without classes never appear.
+function examSubjects(classIds) {
+  const pick = new Set(classIds || []); const all = new Set(EXAM_SUBJECTS_ALWAYS);
+  S.data.reqs.forEach(r => {
+    const cls = r.classIds || [];
+    if (!cls.length || (pick.size && !cls.some(c => pick.has(c)))) return;
+    (r.groups || []).forEach(g => { const s = examSubjectOf(g.subject); if (s && EXAM_SUBJECTS_NO_EXAM.indexOf(s) < 0) all.add(s); });
+  });
+  // joint exams: maths 4+5 together, English at all three levels together (offered next to the single levels)
+  const has = re => Array.from(all).some(s => re.test(s));
+  if (has(/^מתמטיקה [45] /)) all.add('מתמטיקה 4,5 י"ל');
+  if (has(/^אנגלית/)) all.add('אנגלית 3,4,5 י"ל');
+  const key = s => s.replace(/ \d,[\d,]* /, " 9 "); // a joint exam is listed after the single levels
+  return Array.from(all).sort((x, y) => key(x).localeCompare(key(y), "he", { numeric: true }));
+}
+// the exam's title follows the chosen subject until the user writes a title of their own
+function examSubjectChanged() {
+  const s = ((document.getElementById("ex-subject") || {}).value || "").trim();
+  const t = document.getElementById("ev-title"); if (!t) return;
+  const cur = t.value.trim();
+  if (cur && cur !== "בחינה" && cur !== t.dataset.autoTitle) return;
+  t.value = s ? "בחינה ב" + s : "בחינה"; t.dataset.autoTitle = t.value;
+}
+// event form: grade buttons show how much of the grade is selected; the summary counts classes and students
+function evPickSync() {
+  const box = document.getElementById("ev-pick"); if (!box) return;
+  const boxes = Array.from(box.querySelectorAll("[data-evc]"));
+  box.querySelectorAll(".pick-grade").forEach(b => {
+    const mine = boxes.filter(x => { const c = CBY.get(x.getAttribute("data-evc")); return c && (c.grade || "") === b.dataset.g; });
+    const on = mine.filter(x => x.checked).length, all = on > 0 && on === mine.length;
+    b.classList.toggle("on", all); b.classList.toggle("part", on > 0 && !all);
+    b.setAttribute("aria-pressed", all ? "true" : on ? "mixed" : "false");
+    const n = b.querySelector(".num"); if (n) n.textContent = on ? on + "/" + mine.length : "";
+  });
+  const sel = boxes.filter(x => x.checked).map(x => CBY.get(x.getAttribute("data-evc"))).filter(Boolean);
+  const students = sel.reduce((s, c) => s + (+c.students || 0), 0);
+  const sum = document.getElementById("ev-pick-sum");
+  if (sum) sum.textContent = sel.length ? "נבחרו " + sel.length + " כיתות" + (students ? " · " + students + " תלמידים" : "") : "לא נבחרו כיתות";
+  // exam: the number of examinees follows the selected classes until the user types a number
+  const st = document.getElementById("ex-students"), fs = document.getElementById("ev-exam");
+  if (st && fs && !fs.hidden && st.dataset.auto === "1") st.value = students || "";
+  const sb = document.getElementById("ex-subject");
+  if (sb) { // rebuild the list for the selected classes and keep the current choice (also one that is no longer listed)
+    const cur = sb.dataset.cur != null ? sb.dataset.cur : sb.value; delete sb.dataset.cur;
+    const list = examSubjects(sel.map(c => c.id)); if (cur && list.indexOf(cur) < 0) list.unshift(cur);
+    sb.innerHTML = '<option value="">בחרו מקצוע…</option>' + list.map(s => '<option value="' + esc(s) + '"' + (s === cur ? " selected" : "") + ">" + esc(s) + "</option>").join("");
+    sb.value = cur;
+  }
+  examTimeSync();
 }
 function absText(a) {
   let t = tName(a.teacherId);
@@ -419,8 +565,9 @@ function describeChange(ch) {
         (ch.forClassNames || []).forEach(n => { if (!S.data.classes.some(c => c.name === n)) w.push("כיתה לא מוכרת: " + n); });
         if (!ids.length && !(ch.groups || []).length && !(ch.forClasses || []).length && !(ch.forClassNames || []).length && ch.kind !== "ליווי") w.push("לא צוינו כיתות");
         const exs = ch.exam && (ch.exam.rooms || []).length ? " · בחינה ל-" + ch.exam.students + " תלמידים ב-" + ch.exam.rooms.length + " חדרים: " + ch.exam.rooms.map(r => rName(r.roomId) + " (" + r.students + "; משגיחים: " + (r.proctors || []).map(p => p.period + "–" + (p.teacherIds.map(tName).join("+") || "חסר")).join(", ") + ")").join("; ") : "";
+        const xts = ch.exam && ch.exam.extra && +ch.exam.extra.students > 0 ? " · תוספת זמן ל-" + ch.exam.extra.students + " תלמידים" + ((ch.exam.extra.rooms || []).length ? ": " + ch.exam.extra.rooms.map(r => rName(r.roomId) + " (" + r.students + "; משגיחים: " + (r.proctors || []).map(p => p.period + "–" + ((p.teacherIds || []).map(tName).join("+") || "חסר")).join(", ") + ")").join("; ") : "") : "";
         const wss = ch.workshop && (ch.workshop.slots || []).length ? " · רוטציה: " + workshopText({ workshop: ch.workshop }).split("\n").join(" | ") : "";
-        return { text: "אירוע ב" + dateLabel(ch.date) + ": " + (ch.title || "") + (eventSummary(evx) ? " (" + eventSummary(evx) + ")" : "") + (esc2 ? " · מלווים – " + esc2 : "") + exs + wss, warn: w, bad: !ch.title || !isSchoolDay(ch.date) };
+        return { text: "אירוע ב" + dateLabel(ch.date) + ": " + (ch.title || "") + (eventSummary(evx) ? " (" + eventSummary(evx) + ")" : "") + (esc2 ? " · מלווים – " + esc2 : "") + exs + xts + wss, warn: w, bad: !ch.title || !isSchoolDay(ch.date) };
       }
       case "remove_event": { const ev = ((S.daily[ch.date] || {}).events || []).find(e => e.id === ch.eventId); return { text: "מחיקת אירוע: " + (ev ? ev.title : "?"), bad: !ev }; }
       case "class_absent": return { text: "כיתה " + cName(ch.classId) + " לא בבית הספר ב" + dateLabel(ch.date) + (ch.note ? " (" + ch.note + ")" : ""), bad: !CBY.get(ch.classId) };
@@ -530,6 +677,9 @@ function applyChanges(changes, source, label) {
         if (fc.length) ev.forClasses = fc;
         if (ch.workshop) ev.workshop = { stations: (ch.workshop.stations || []).map(st => ({ name: String(st.name || ""), roomId: RBY.get(st.roomId) ? st.roomId : null, teacherId: TBY.get(st.teacherId) ? st.teacherId : null })), groups: ch.workshop.groups || [], slots: (ch.workshop.slots || []).map(sl => ({ period: +sl.period, assign: (sl.assign || []).map(a => ({ group: +a.group || 0, classIds: (a.classIds || []).filter(c => CBY.get(c)), station: +a.station || 0, escortIds: (a.escortIds || []).filter(t => TBY.get(t)) })) })) };
         if (ch.exam) ev.exam = { students: +ch.exam.students || 0, perRoom: +ch.exam.perRoom || 1, ratio: +ch.exam.ratio || 30, seatPct: +ch.exam.seatPct || 100, roomTypes: Array.isArray(ch.exam.roomTypes) && ch.exam.roomTypes.length ? ch.exam.roomTypes : ["כיתה", "אולם"], rooms: (ch.exam.rooms || []).filter(r => RBY.get(r.roomId)).map(r => ({ roomId: r.roomId, students: +r.students || 0, proctors: (r.proctors || []).map(p => ({ period: +p.period, teacherIds: (p.teacherIds || []).filter(t => TBY.get(t)) })) })) };
+        if (ch.exam && ch.exam.subject) ev.exam.subject = String(ch.exam.subject).trim().slice(0, 60);
+        if (ch.exam && +ch.exam.maxPerRoom > 0) ev.exam.maxPerRoom = Math.round(+ch.exam.maxPerRoom);
+        if (ch.exam && ch.exam.extra && +ch.exam.extra.students > 0) { const x = ch.exam.extra; ev.exam.extra = { students: +x.students, minutes: +x.minutes || 30, roomId: RBY.get(x.roomId) ? x.roomId : null, periods: (x.periods || []).map(Number).filter(n => n >= 0), rooms: (x.rooms || []).filter(r => RBY.get(r.roomId)).map(r => ({ roomId: r.roomId, students: +r.students || 0, proctors: (r.proctors || []).map(p => ({ period: +p.period, teacherIds: (p.teacherIds || []).filter(t => TBY.get(t)) })) })), planned: !!x.planned }; }
         const i = d.events.findIndex(e => e.id === ev.id); if (i >= 0) d.events[i] = ev; else d.events.push(ev);
         touched.add("daily:" + ch.date); break;
       }
@@ -599,6 +749,7 @@ function render() {
   const m2 = document.querySelector(".ag-msgs"); if (m2) m2.scrollTop = atBottom ? m2.scrollHeight : msgScroll;
   if (mainEl) window.scrollTo(0, mainScroll);
   for (const id in drafts) { const el = document.getElementById(id); if (el && !el.value) el.value = drafts[id]; }
+  evPickSync();
   if (focusId) { const f = document.getElementById(focusId); if (f && f !== document.activeElement) { f.focus(); if (f.setSelectionRange && f.value != null && f.type === "text" || f.tagName === "TEXTAREA") { try { const l = f.value.length; f.setSelectionRange(l, l); } catch (e) { } } } }
 }
 function header() {
@@ -726,8 +877,11 @@ function examCard(ev) {
   if (!ev.exam && EXAM_KINDS.indexOf(ev.kind) < 0) return "";
   const ex = ev.exam || { students: 0, rooms: [] };
   const seats = (ex.rooms || []).reduce((a, r) => a + (r.students || 0), 0);
-  const missingP = (ex.rooms || []).reduce((a, r) => a + (r.proctors || []).filter(p => !p.teacherIds.length).length, 0);
-  let h = '<div class="small" style="display:grid;gap:4px;margin-top:4px"><div class="row"><span class="pill ' + (seats >= ex.students && !missingP && (ex.rooms || []).length ? "ok" : "warn") + '">' + (ex.students || 0) + " נבחנים · " + (ex.rooms || []).length + " חדרים · " + seats + " מקומות" + (missingP ? " · חסרים משגיחים" : "") + "</span></div>";
+  const xt = ex.extra && +ex.extra.students > 0 ? ex.extra : null;
+  const xSeats = xt ? (xt.rooms || []).reduce((a, r) => a + (r.students || 0), 0) : 0;
+  const xOk = !xt || (xt.planned && (!(xt.periods || []).length || xSeats >= xt.students));
+  const missingP = (ex.rooms || []).concat(xt ? xt.rooms || [] : []).reduce((a, r) => a + (r.proctors || []).filter(p => !p.teacherIds.length).length, 0);
+  let h = '<div class="small" style="display:grid;gap:4px;margin-top:4px"><div class="row"><span class="pill ' + (seats >= ex.students && !missingP && (ex.rooms || []).length && xOk ? "ok" : "warn") + '">' + (ex.subject ? esc(ex.subject) + " · " : "") + (ex.students || 0) + " נבחנים · " + (ex.rooms || []).length + " חדרים · " + seats + " מקומות" + (xt ? " · תוספת זמן: " + xt.students + (xOk ? "" : " (לא שובץ)") : "") + (missingP ? " · חסרים משגיחים" : "") + "</span></div>";
   if ((ex.rooms || []).length) h += '<div class="muted" style="white-space:pre-line">' + esc(examText(ev)) + "</div>";
   if (S.canEdit) h += '<div class="row"><label class="row small" style="gap:4px">נבחנים בפועל<input type="number" min="0" id="ex-n-' + ev.id + '" value="' + (ex.students || "") + '" style="width:72px"></label><button class="btn sm primary" data-a="exam-replan" data-id="' + ev.id + '">' + ((ex.rooms || []).length ? "סדר מחדש חדרים ומשגיחים" : "תכנן חדרים ומשגיחים") + "</button></div>";
   return h + "</div>";
@@ -738,11 +892,11 @@ function examPlanProposal(ev, students) {
   const plan = E.planExam(M, S.placements, S.daily[S.date] || {}, wd, e2, weekProctorLoad(S.date));
   const evOp = Object.assign({ op: "event", date: S.date }, plan.event);
   const changes = [evOp].concat(plan.changes.map(c => Object.assign({}, c, { date: S.date })));
-  return { changes, notes: plan.notes, summary: (ev.title || "בחינה") + ": " + plan.rooms.length + " חדרים, " + plan.seats + " מקומות" };
+  return { changes, notes: plan.notes, summary: (ev.title || "בחינה") + ": " + plan.rooms.length + " חדרים, " + plan.seats + " מקומות" + (plan.extra ? ", תוספת זמן ל-" + plan.extra.students + " תלמידים" : "") };
 }
 function weekProctorLoad(date) {
   const load = Object.assign({}, weekSubCounts(date));
-  E.weekDates(date).forEach(d => { const doc = S.daily[d]; if (!doc) return; (doc.events || []).forEach(ev => ((ev.exam || {}).rooms || []).forEach(r => (r.proctors || []).forEach(p => p.teacherIds.forEach(t => { load[t] = (load[t] || 0) + 1; })))); });
+  E.weekDates(date).forEach(d => { const doc = S.daily[d]; if (!doc) return; (doc.events || []).forEach(ev => ((ev.exam || {}).rooms || []).concat(((ev.exam || {}).extra || {}).rooms || []).forEach(r => (r.proctors || []).forEach(p => p.teacherIds.forEach(t => { load[t] = (load[t] || 0) + 1; })))); });
   return load;
 }
 function issueMoves(x) {
@@ -944,8 +1098,8 @@ function incOpen(kind) { S.modal = { type: "incident", step: 1, kind: kind || "a
 function incPeriods(f) { const wd = weekday(S.modal.date); const a = fp(), b = S.data.config.periods[wd] + fp() - 1; const from = f.from !== "" && f.from != null ? +f.from : a, to = f.to !== "" && f.to != null ? +f.to : b; const out = []; for (let n = Math.max(a, from); n <= Math.min(b, to); n++) out.push(n); return out; }
 function incClassPicker(sel) {
   const grades = [...new Set(S.data.classes.map(c => c.grade).filter(Boolean))];
-  return '<div class="row small" style="gap:6px;margin-bottom:6px">' + grades.map(g => '<button type="button" class="btn sm ghost" data-a="inc-grade" data-g="' + esc(g) + '">שכבת ' + esc(g) + "</button>").join("") + '<button type="button" class="btn sm ghost" data-a="inc-grade" data-g="">ניקוי</button></div><div class="chips" style="max-height:150px;overflow:auto">' +
-    S.data.classes.map(c => '<label class="chip" style="cursor:pointer"><input type="checkbox" data-incc="' + c.id + '"' + (sel.indexOf(c.id) >= 0 ? " checked" : "") + "> " + esc(c.name) + "</label>").join("") + "</div>";
+  return '<div class="pick"><div class="row small" style="gap:6px;margin-bottom:6px">' + grades.map(g => '<button type="button" class="btn sm" data-a="inc-grade" data-g="' + esc(g) + '" title="לחיצה מסמנת את כל השכבה, לחיצה נוספת מנקה אותה">שכבת ' + esc(g) + "</button>").join("") + '<button type="button" class="btn sm ghost" data-a="inc-grade" data-g="">ניקוי</button></div><div class="chips" style="max-height:150px;overflow:auto">' +
+    S.data.classes.map(c => '<label class="chip"><input type="checkbox" data-incc="' + c.id + '"' + (sel.indexOf(c.id) >= 0 ? " checked" : "") + "> " + esc(c.name) + "</label>").join("") + "</div></div>";
 }
 function incForm(m) {
   const f = m.f; const k = m.kind; const wd = weekday(m.date); const maxP = S.data.config.periods[wd] + fp() - 1;
@@ -1109,12 +1263,14 @@ function eventTimetable(date, ev) {
     h += "</tbody></table></div>";
   } else if (ev.exam && (ev.exam.rooms || []).length) {
     const periods = []; for (let n = +ev.from; n <= +(ev.to || ev.from); n++) periods.push(n);
+    if (ev.exam.subject) h += '<div class="small" style="margin-bottom:6px">מקצוע: <b>' + esc(ev.exam.subject) + "</b></div>";
     if ((ev.forClasses || []).length) h += '<div class="small" style="margin-bottom:6px">נבחנים מכיתות: <b>' + esc(compactClasses(ev.forClasses)) + "</b></div>";
     h += '<div style="overflow-x:auto"><table class="t small"><thead><tr><th>חדר</th><th>נבחנים</th>' + periods.map(n => "<th>שעה " + n + "</th>").join("") + "</tr></thead><tbody>" + ev.exam.rooms.map(r => "<tr><td>" + esc(rName(r.roomId)) + '</td><td class="num">' + r.students + "</td>" + periods.map(n => { const pr = (r.proctors || []).find(x => +x.period === n); return "<td>" + (pr && pr.teacherIds.length ? esc(pr.teacherIds.map(tName).join(", ")) : '<span style="color:var(--bad)">חסר משגיח</span>') + "</td>"; }).join("") + "</tr>").join("") + "</tbody></table></div>";
+    h += examExtraHtml(ev.exam.extra);
   } else {
     const periods = ev.from ? (() => { const a = []; for (let n = +ev.from; n <= +(ev.to || ev.from); n++) a.push(n); return a; })() : [];
     h += '<div class="small">' + (periods.length ? "שעות " + periods[0] + (periods.length > 1 ? "–" + periods[periods.length - 1] : "") : "כל היום") + ((ev.classIds || []).length ? " · " + esc(compactClasses(ev.classIds)) : "") + ((ev.groups || []).length ? " · " + esc(eventSummary({ groups: ev.groups })) : "") + "</div>";
-    if (ev.exam) h += '<div class="note">' + (ev.exam.students ? ev.exam.students + " נבחנים. " : "") + 'עוד לא שובצו חדרים ומשגיחים – לחצו "תכנון מחדש".</div>';
+    if (ev.exam) h += '<div class="note">' + (ev.exam.subject ? "מקצוע: " + esc(ev.exam.subject) + ". " : "") + (ev.exam.students ? ev.exam.students + " נבחנים. " : "") + 'עוד לא שובצו חדרים ומשגיחים – לחצו "תכנון מחדש".</div>';
     if ((ev.escorts || []).length) h += '<div style="overflow-x:auto"><table class="t small"><thead><tr><th>שעה</th><th>מורים מלווים</th></tr></thead><tbody>' + ev.escorts.slice().sort((a, b) => a.period - b.period).map(e => '<tr><td class="num">' + e.period + "</td><td>" + esc(e.teacherIds.map(tName).join(", ")) + "</td></tr>").join("") + "</tbody></table></div>";
   }
   // what happens to the rest of the school that day
@@ -1150,8 +1306,14 @@ function exportEvent(date, id) {
     w.slots.forEach(sl => aoa.push([sl.period].concat(groups.map((g, i) => { const a = sl.assign.find(x => x.group === i) || sl.assign[i]; if (!a) return ""; const st = w.stations[a.station] || {}; return st.name + (st.roomId ? " | " + rName(st.roomId) : "") + (a.escortIds.length ? " | " + a.escortIds.map(tName).join(", ") : ""); }))));
   } else if (ev.exam && (ev.exam.rooms || []).length) {
     const periods = []; for (let n = +ev.from; n <= +(ev.to || ev.from); n++) periods.push(n);
+    if (ev.exam.subject) aoa.push(["מקצוע", ev.exam.subject], []);
     aoa.push(["חדר", "נבחנים"].concat(periods.map(n => "שעה " + n)));
     ev.exam.rooms.forEach(r => aoa.push([rName(r.roomId), r.students].concat(periods.map(n => { const pr = (r.proctors || []).find(x => +x.period === n); return pr ? pr.teacherIds.map(tName).join(", ") : ""; }))));
+    const xt = ev.exam.extra;
+    if (xt && (xt.rooms || []).length) {
+      aoa.push([], ["תוספת זמן – " + xt.students + " תלמידים, " + xt.minutes + " דקות"], ["חדר", "תלמידים"].concat((xt.periods || []).map(n => "שעה " + n)));
+      xt.rooms.forEach(r => aoa.push([rName(r.roomId), r.students].concat((xt.periods || []).map(n => { const pr = (r.proctors || []).find(x => +x.period === n); return pr ? pr.teacherIds.map(tName).join(", ") : ""; }))));
+    }
   } else {
     aoa.push(["שעות", ev.from ? ev.from + "-" + (ev.to || ev.from) : "כל היום"], ["כיתות", compactClasses(ev.classIds || [])]);
     (ev.escorts || []).forEach(e => aoa.push(["מלווים שעה " + e.period, e.teacherIds.map(tName).join(", ")]));
@@ -1358,9 +1520,10 @@ function eventModal(m) {
   const blocks = new Map();
   E.dayLessons(M, S.placements, null, wd).forEach(L => { if (L.req.groups.length > 1) blocks.set(L.req.id + "|" + L.gi, L); });
   const maxP = S.data.config.periods[wd] + fp() - 1;
-  let body = '<div class="fgrid"><label class="f">שם האירוע<input type="text" id="ev-title" value="' + esc(e0.title) + '" placeholder="למשל: הרצאה לשכבת י באולם"></label><label class="f">סוג<select id="ev-kind"><option value=""></option>' + EVENT_KINDS.map(k => "<option" + (k === e0.kind ? " selected" : "") + ">" + esc(k) + "</option>").join("") + '</select></label><label class="f">משעה<input type="number" id="ev-from" min="' + fp() + '" max="' + maxP + '" value="' + esc(e0.from || "") + '"></label><label class="f">עד שעה<input type="number" id="ev-to" min="' + fp() + '" max="' + maxP + '" value="' + esc(e0.to || "") + '"></label></div><p class="muted small" style="margin:0">בלי שעות = כל היום. אירוע בלי כיתות (למשל נבחרת) מופיע רק בהודעה לצוות.</p>';
+  let body = '<div class="fgrid"><label class="f" id="ex-subject-wrap"' + (EXAM_KINDS.indexOf(e0.kind) >= 0 || e0.exam ? "" : " hidden") + '>מקצוע הבחינה<select id="ex-subject" data-cur="' + esc((e0.exam || {}).subject || "") + '"></select></label><label class="f">שם האירוע<input type="text" id="ev-title" value="' + esc(e0.title) + '" placeholder="למשל: הרצאה לשכבת י באולם"></label><label class="f">סוג<select id="ev-kind"><option value=""></option>' + EVENT_KINDS.map(k => "<option" + (k === e0.kind ? " selected" : "") + ">" + esc(k) + "</option>").join("") + '</select></label><label class="f">משעה<input type="number" id="ev-from" min="' + fp() + '" max="' + maxP + '" value="' + esc(e0.from || "") + '"' + (e0.from ? "" : ' data-auto="1"') + '></label><label class="f">עד שעה<input type="number" id="ev-to" min="' + fp() + '" max="' + maxP + '" value="' + esc(e0.to || "") + '"' + (e0.to ? "" : ' data-auto="1"') + '></label></div><div class="note info" id="ex-time-hint" hidden></div><p class="muted small" style="margin:0">בלי שעות = כל היום. אירוע בלי כיתות (למשל נבחרת) מופיע רק בהודעה לצוות.</p>';
   body = '<div class="row small"><span class="muted">תבנית מהירה:</span><button class="btn sm" data-a="ev-tpl" data-t="short">יום מקוצר</button><button class="btn sm" data-a="ev-tpl" data-t="ceremony">חג / טקס</button><button class="btn sm" data-a="ev-tpl" data-t="start">תחילת שנה</button><button class="btn sm" data-a="ev-tpl" data-t="ws">סדנאות / הרצאות ברוטציה</button><button class="btn sm" data-a="ev-tpl" data-t="exam">בחינה</button></div>' + body;
-  body += '<div><div class="row small" style="margin-bottom:4px"><span class="muted">כיתות שיוצאות לאירוע</span><button class="btn sm ghost" data-a="ev-all">כל הכיתות</button><button class="btn sm ghost" data-a="ev-none">ניקוי</button></div>' + grades.map(g => '<div class="row" style="margin-bottom:4px"><button class="btn sm ghost" data-a="ev-grade" data-g="' + esc(g) + '">שכבת ' + esc(g) + "</button>" + S.data.classes.filter(c => (c.grade || "") === g).map(c => '<label class="chip" style="padding:3px 9px"><input type="checkbox" data-evc="' + c.id + '"' + ((e0.classIds || []).indexOf(c.id) >= 0 ? " checked" : "") + "> " + esc(c.name) + "</label>").join("") + "</div>").join("") + "</div>";
+  body += '<div class="pick" id="ev-pick"><div class="row small" style="margin-bottom:6px"><span class="muted">כיתות שיוצאות לאירוע</span><button type="button" class="btn sm ghost" data-a="ev-all">כל הכיתות</button><button type="button" class="btn sm ghost" data-a="ev-none">ניקוי</button><span class="spacer"></span><span class="pill" id="ev-pick-sum"></span></div>' +
+    grades.map(g => '<div class="row pick-row"><button type="button" class="btn sm pick-grade" data-a="ev-grade" data-g="' + esc(g) + '" title="לחיצה מסמנת את כל השכבה, לחיצה נוספת מנקה אותה">' + (g ? "שכבת " + esc(g) : "ללא שכבה") + '<span class="num"></span></button>' + S.data.classes.filter(c => (c.grade || "") === g).map(c => '<label class="chip"><input type="checkbox" data-evc="' + c.id + '"' + ((e0.classIds || []).indexOf(c.id) >= 0 ? " checked" : "") + "> " + esc(c.name) + "</label>").join("") + "</div>").join("") + "</div>";
   if (blocks.size) {
     const sel = new Set((e0.groups || []).map(g => g.reqId + "|" + g.group));
     body += '<details' + (sel.size ? " open" : "") + '><summary class="small muted" style="cursor:pointer">או רק קבוצה מתוך אשכול (למשל אשכול ביולוגיה יב)</summary><div class="row" style="margin-top:6px">' + Array.from(blocks.entries()).sort((a, b) => reqClasses(a[1].req).localeCompare(reqClasses(b[1].req), "he")).map(([k, L]) => '<label class="chip" style="padding:3px 9px"><input type="checkbox" data-evg="' + esc(k) + '"' + (sel.has(k) ? " checked" : "") + "> " + esc(L.group.subject + " – " + tName(L.teacherId) + " (" + (L.req.label || reqClasses(L.req)) + ")") + "</label>").join("") + "</div></details>";
@@ -1373,7 +1536,7 @@ function eventModal(m) {
   const ex0 = e0.exam || {};
   const rtypes = S.data.config.roomTypes || [];
   const rtSel = ex0.roomTypes || ["כיתה", "אולם"];
-  body += '<fieldset id="ev-exam" style="border:1px solid var(--line);border-radius:8px;padding:10px;display:grid;gap:8px"' + (EXAM_KINDS.indexOf(e0.kind) >= 0 || e0.exam ? "" : " hidden") + '><legend class="small" style="padding:0 6px">בחינה – חדרים ומשגיחים</legend><div class="fgrid"><label class="f">מספר נבחנים<input type="number" min="0" id="ex-students" value="' + esc(ex0.students || "") + '"></label><label class="f">משגיחים לחדר (מינימום)<select id="ex-per"><option value="1"' + (ex0.perRoom === 2 ? "" : " selected") + '>1</option><option value="2"' + (ex0.perRoom === 2 ? " selected" : "") + '>2</option></select></label><label class="f">תלמידים למשגיח<input type="number" min="5" id="ex-ratio" value="' + esc(ex0.ratio || 30) + '"></label><label class="f">ניצול מקומות בחדר (%)<input type="number" min="10" max="100" id="ex-seat" value="' + esc(ex0.seatPct || 100) + '"></label></div><div class="row small"><span class="muted">חדרים לבחינה:</span>' + rtypes.map(t => '<label class="chip" style="padding:2px 8px"><input type="checkbox" data-ext="' + esc(t) + '"' + (rtSel.indexOf(t) >= 0 ? " checked" : "") + "> " + esc(t) + "</label>").join("") + '</div><p class="muted small" style="margin:0">משגיחים מועדפים: מורים שהשיעור שלהם בוטל בגלל הבחינה, ואחריהם מורים שנמצאים בבית הספר בחלון. מורה שלא עובד באותו יום נבחר רק אם אין ברירה.</p></fieldset>';
+  body += '<fieldset id="ev-exam" style="border:1px solid var(--line);border-radius:8px;padding:10px;display:grid;gap:8px"' + (EXAM_KINDS.indexOf(e0.kind) >= 0 || e0.exam ? "" : " hidden") + '><legend class="small" style="padding:0 6px">בחינה – חדרים ומשגיחים</legend><div class="fgrid"><label class="f">מספר נבחנים<input type="number" min="0" id="ex-students" value="' + esc(ex0.students || "") + '" placeholder="לפי הכיתות שנבחרו"' + (ex0.students ? "" : ' data-auto="1"') + '></label><label class="f">מקסימום תלמידים בחדר<input type="number" min="1" id="ex-max" value="' + esc(ex0.maxPerRoom || 35) + '"></label><label class="f">משגיחים לחדר<select id="ex-per"><option value="1"' + (ex0.perRoom === 2 ? "" : " selected") + '>1</option><option value="2"' + (ex0.perRoom === 2 ? " selected" : "") + '>2</option></select></label></div><div class="row small"><span class="muted">חדרים לבחינה:</span>' + rtypes.map(t => '<label class="chip" style="padding:2px 8px"><input type="checkbox" data-ext="' + esc(t) + '"' + (rtSel.indexOf(t) >= 0 ? " checked" : "") + "> " + esc(t) + "</label>").join("") + '</div><p class="muted small" style="margin:0">החדרים הראשונים שנבחרים הם חדרי האם של הכיתות הנבחנות. משגיחים מועדפים: מורים שהשיעור שלהם בוטל בגלל הבחינה, ואחריהם מורים שנמצאים בבית הספר בחלון. מורה שלא עובד באותו יום נבחר רק אם אין ברירה.</p>' + examExtraFields(ex0) + '</fieldset>';
   body += '<div><div class="small muted" style="margin-bottom:4px">מורים מלווים לכל שעה (שמות מופרדים בפסיק). הם יסומנו כתפוסים, והשיעורים שלהם יופיעו לטיפול.</div><datalist id="teacher-names">' + S.data.teachers.map(t => '<option value="' + esc(t.name) + '">').join("") + '</datalist><div class="stack" id="ev-escorts">';
   const from = +(e0.from || 0), to = +(e0.to || 0);
   const periods = from && to ? Array.from({ length: to - from + 1 }, (_, i) => from + i) : (e0.escorts || []).map(e => e.period);
@@ -1392,8 +1555,10 @@ function openExamPlan(evId, students) {
 function evKindChanged(kind) {
   const ex = EXAM_KINDS.indexOf(kind) >= 0, ws = kind === WS_KIND;
   const f = document.getElementById("ev-exam"); if (f) f.hidden = !ex;
+  const sw = document.getElementById("ex-subject-wrap"); if (sw) sw.hidden = !ex;
   const w = document.getElementById("ev-ws"); if (w) w.hidden = !ws;
   const b = document.getElementById("ev-plan-btn"); if (b) { b.hidden = !(ex || ws); b.textContent = ws ? "שמירה ותכנון רוטציה" : "שמירה ותכנון חדרים ומשגיחים"; }
+  evPickSync();
 }
 function applyTemplate(t) {
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
@@ -1436,7 +1601,11 @@ function saveEventForm(force) {
   const fs = document.getElementById("ev-exam");
   if (fs && !fs.hidden) {
     const prev = S.modal.id ? ((dailyDoc(S.date).events.find(e => e.id === S.modal.id) || {}).exam || {}) : {};
-    ch.exam = { students: parseInt(v("ex-students"), 10) || 0, perRoom: +v("ex-per") || 1, ratio: parseInt(v("ex-ratio"), 10) || 30, seatPct: parseInt(v("ex-seat"), 10) || 100, roomTypes: Array.from(document.querySelectorAll("[data-ext]")).filter(x => x.checked).map(x => x.getAttribute("data-ext")), rooms: prev.rooms || [] };
+    ch.exam = { students: parseInt(v("ex-students"), 10) || 0, perRoom: +v("ex-per") || 1, ratio: 1000, seatPct: 100, maxPerRoom: parseInt(v("ex-max"), 10) || 35, roomTypes: Array.from(document.querySelectorAll("[data-ext]")).filter(x => x.checked).map(x => x.getAttribute("data-ext")), rooms: prev.rooms || [] };
+    if (v("ex-subject").trim()) ch.exam.subject = v("ex-subject").trim();
+    if (parseInt(ch.from, 10) < 1 && v("ev-from") !== "") return toast("בחינה לא נקבעת בשעת אפס – בחרו שעה 1 ומעלה");
+    const xn = parseInt(v("ex-xn"), 10) || 0;
+    if (xn > 0) { const px = prev.extra || {}; ch.exam.extra = { students: xn, minutes: parseInt(v("ex-xmin"), 10) || 30, roomId: v("ex-xroom") || null, periods: px.periods || [], rooms: px.rooms || [], planned: !!px.planned }; }
   }
   // educators escort their own classes during the event
   if ((document.getElementById("ev-edu") || {}).checked) {
@@ -1897,7 +2066,7 @@ document.addEventListener("click", e => {
     case "ev-filter": S.evFilter = ds.v; render(); break;
     case "ts-pick": tsChoose(ds.for, ds.id); break;
     case "inc-open": incOpen(ds.v); break;
-    case "inc-grade": { incReadForm(); const g = ds.g; S.modal.f.classIds = g ? [...new Set((S.modal.f.classIds || []).concat(S.data.classes.filter(c => c.grade === g).map(c => c.id)))] : []; render(); break; }
+    case "inc-grade": { incReadForm(); const g = ds.g; const cur = S.modal.f.classIds || []; const mine = S.data.classes.filter(c => c.grade === g).map(c => c.id); const all = mine.length > 0 && mine.every(id => cur.indexOf(id) >= 0); S.modal.f.classIds = !g ? [] : all ? cur.filter(id => mine.indexOf(id) < 0) : [...new Set(cur.concat(mine))]; render(); break; }
     case "inc-plan": { incReadForm(); const err = incPlan(); if (err) { toast(err); break; } S.modal.step = 2; render(); break; }
     case "inc-back": S.modal.step = 1; render(); break;
     case "inc-strat": incStrategy(ds.v); render(); break;
@@ -1909,11 +2078,16 @@ document.addEventListener("click", e => {
     case "ev-edit-at": S.date = ds.date; S.modal = { type: "event", id: ds.id }; render(); break;
     case "ev-replan-at": S.date = ds.date; if (ds.k === "ws") openWorkshopPlan(ds.id); else openExamPlan(ds.id); break;
     case "ev-export": exportEvent(ds.date, ds.id); break;
-    case "ev-all": document.querySelectorAll("[data-evc]").forEach(x => { x.checked = true; }); break;
-    case "ev-none": document.querySelectorAll("[data-evc]").forEach(x => { x.checked = false; }); break;
+    case "ev-all": document.querySelectorAll("[data-evc]").forEach(x => { x.checked = true; }); evPickSync(); break;
+    case "ev-none": document.querySelectorAll("[data-evc]").forEach(x => { x.checked = false; }); evPickSync(); break;
     case "ws-add": { const box = document.getElementById("ws-rows"); const div = document.createElement("div"); div.innerHTML = wsRow({}); box.appendChild(div.firstChild); break; }
     case "ws-replan": openWorkshopPlan(ds.id); break;
-    case "ev-grade": document.querySelectorAll("[data-evc]").forEach(x => { const c = CBY.get(x.getAttribute("data-evc")); if (c && (c.grade || "") === ds.g) x.checked = true; }); break;
+    case "ev-grade": { // selects the whole grade; when it is already fully selected, clears it
+      const mine = Array.from(document.querySelectorAll("[data-evc]")).filter(x => { const c = CBY.get(x.getAttribute("data-evc")); return c && (c.grade || "") === ds.g; });
+      const all = mine.length > 0 && mine.every(x => x.checked);
+      mine.forEach(x => { x.checked = !all; });
+      evPickSync(); break;
+    }
     case "ev-add-escort": { const box = document.getElementById("ev-escorts"); const last = box.querySelector(".row:last-child .ev-ep"); const div = document.createElement("div"); div.className = "row"; div.innerHTML = '<input type="number" class="ev-ep" placeholder="שעה" style="width:64px" value="' + (last && last.value ? +last.value + 1 : "") + '"><input type="text" class="ev-et" list="teacher-names" placeholder="שמות מורים" style="flex:1;min-width:0">'; box.appendChild(div); break; }
     case "day-move": applyChanges([{ op: "day_move", date: S.date, pid: ds.pid, toPeriod: +ds.to, replacesPid: ds.rep, replacesGroup: +ds.repg, roomId: ds.room || undefined }], "ידני"); break;
     case "day-room": applyChanges([{ op: "daily_room", date: S.date, pid: ds.pid, group: +ds.gi, roomId: ds.room }], "ידני"); break;
@@ -1969,6 +2143,7 @@ document.addEventListener("change", e => {
   if (e.target.dataset && e.target.dataset.incRow != null && S.modal && S.modal.plan) { S.modal.plan.rows[+e.target.dataset.incRow].pick = +e.target.value; }
   if (e.target.id === "inc-pick" && e.target.value) { const v = e.target.value; e.target.value = ""; incOpen(v); return; }
   const el = e.target;
+  if (el.dataset && el.dataset.evc != null) evPickSync();
   if (el.id === "entity") { S.entity = el.value; persistUi(); render(); }
   if (el.id === "date") { if (el.value) { S.date = el.value; render(); } }
   if (el.id === "imp-file" && el.files[0]) readImportFile(el.files[0]);
@@ -2016,6 +2191,9 @@ document.addEventListener("paste", e => {
 });
 let filterT = null;
 document.addEventListener("input", e => {
+  if (e.target.id === "ex-students") delete e.target.dataset.auto;
+  if (e.target.id === "ex-subject") { examSubjectChanged(); examTimeSync(); }
+  if (e.target.id === "ev-from" || e.target.id === "ev-to") delete e.target.dataset.auto;
   if (e.target.id === "filter") { S.filter = e.target.value; clearTimeout(filterT); filterT = setTimeout(render, 150); }
   if (e.target.classList && e.target.classList.contains("ts-in")) { const hv = document.getElementById(e.target.id + "-val"); if (hv) hv.value = ""; tsUpdate(e.target); }
 });
@@ -2095,7 +2273,7 @@ function shortDate(iso) { const p = String(iso).split("-"); return p.length === 
 function changeSubTable(c) {
   if (c.op === "event" && c.exam && (c.exam.rooms || []).length) {
     const ps = []; for (let n = +c.from; n <= +(c.to || c.from); n++) ps.push(n);
-    return '<table class="t small sub"><thead><tr><th>חדר</th><th>נבחנים</th>' + ps.map(n => "<th>משגיחים שעה " + n + "</th>").join("") + "</tr></thead><tbody>" + c.exam.rooms.map(r => "<tr><td>" + esc(rName(r.roomId)) + '</td><td class="num">' + (r.students || "") + "</td>" + ps.map(n => { const pr = (r.proctors || []).find(x => +x.period === n); return "<td>" + (pr && (pr.teacherIds || []).length ? esc(pr.teacherIds.map(tName).join(", ")) : '<span style="color:var(--bad)">חסר</span>') + "</td>"; }).join("") + "</tr>").join("") + "</tbody></table>";
+    return '<table class="t small sub"><thead><tr><th>חדר</th><th>נבחנים</th>' + ps.map(n => "<th>משגיחים שעה " + n + "</th>").join("") + "</tr></thead><tbody>" + c.exam.rooms.map(r => "<tr><td>" + esc(rName(r.roomId)) + '</td><td class="num">' + (r.students || "") + "</td>" + ps.map(n => { const pr = (r.proctors || []).find(x => +x.period === n); return "<td>" + (pr && (pr.teacherIds || []).length ? esc(pr.teacherIds.map(tName).join(", ")) : '<span style="color:var(--bad)">חסר</span>') + "</td>"; }).join("") + "</tr>").join("") + "</tbody></table>" + examExtraHtml(c.exam.extra, "t small sub");
   }
   if (c.op === "event" && c.workshop && (c.workshop.slots || []).length) {
     const w = c.workshop;
@@ -2337,8 +2515,8 @@ const AGENT_TOOLS = [
     }
   },
   {
-    name: "plan_exam", description: "מתכנן (בלי לבצע) חדרים ומשגיחים לבחינה או מועד ב׳: לפי מספר הנבחנים וגודל החדרים, עם משגיחים שעובדים ופנויים, הזזת שיעורים לפינוי חדרים ושחרור שיעורי קצה כשחסרים משגיחים. לאירוע קיים – eventId (שומר את מה שעובד ומוסיף). מחזיר changes מוכנים ל-propose_changes.",
-    inputSchema: { type: "object", properties: { date: { type: "string" }, eventId: { type: "string" }, title: { type: "string" }, from: { type: "integer" }, to: { type: "integer" }, classNames: { type: "array", items: { type: "string" } }, forClassNames: { type: "array", items: { type: "string" } }, students: { type: "integer" }, perRoom: { type: "integer" }, ratio: { type: "integer" }, seatPct: { type: "integer" }, roomTypes: { type: "array", items: { type: "string" } } }, required: ["date", "students"] },
+    name: "plan_exam", description: "מתכנן (בלי לבצע) חדרים ומשגיחים לבחינה או מועד ב׳: לפי מספר הנבחנים וגודל החדרים, עם משגיחים שעובדים ופנויים, הזזת שיעורים לפינוי חדרים ושחרור שיעורי קצה כשחסרים משגיחים. לאירוע קיים – eventId (שומר את מה שעובד ומוסיף). תוספת זמן: extraStudents (כמה תלמידים) ו-extraMinutes (ברירת מחדל 30) – ישובצו חדר ומשגיח לשעה שאחרי הבחינה. מחזיר changes מוכנים ל-propose_changes.",
+    inputSchema: { type: "object", properties: { date: { type: "string" }, eventId: { type: "string" }, title: { type: "string" }, from: { type: "integer" }, to: { type: "integer" }, classNames: { type: "array", items: { type: "string" } }, forClassNames: { type: "array", items: { type: "string" } }, students: { type: "integer" }, perRoom: { type: "integer" }, ratio: { type: "integer" }, seatPct: { type: "integer" }, roomTypes: { type: "array", items: { type: "string" } }, extraStudents: { type: "integer" }, extraMinutes: { type: "integer" }, subject: { type: "string" } }, required: ["date", "students"] },
     execute(i) {
       if (!isSchoolDay(String(i.date || ""))) return { error: "אין לימודים בתאריך הזה" };
       setAgentStatus("מתכנן חדרים ומשגיחים…");
@@ -2352,7 +2530,7 @@ const AGENT_TOOLS = [
           ev = { id: E.uid("e"), title: i.title || "בחינה", kind: "בחינה", from: i.from, to: i.to || i.from, classIds: (i.classNames || []).map(n => (S.data.classes.find(c => c.name === n) || {}).id).filter(Boolean), groups: [], escorts: [] };
           const fc = (i.forClassNames || []).map(n => (S.data.classes.find(c => c.name === n) || {}).id).filter(Boolean); if (fc.length) ev.forClasses = fc;
         }
-        ev = Object.assign({}, ev, { exam: Object.assign({}, ev.exam || {}, { students: i.students }, i.perRoom ? { perRoom: i.perRoom } : {}, i.ratio ? { ratio: i.ratio } : {}, i.seatPct ? { seatPct: i.seatPct } : {}, i.roomTypes ? { roomTypes: i.roomTypes } : {}) });
+        ev = Object.assign({}, ev, { exam: Object.assign({}, ev.exam || {}, { students: i.students }, i.perRoom ? { perRoom: i.perRoom } : {}, i.ratio ? { ratio: i.ratio } : {}, i.seatPct ? { seatPct: i.seatPct } : {}, i.roomTypes ? { roomTypes: i.roomTypes } : {}, i.subject ? { subject: i.subject } : {}, i.extraStudents ? { extra: Object.assign({}, (ev.exam || {}).extra || {}, { students: i.extraStudents, minutes: i.extraMinutes || ((ev.exam || {}).extra || {}).minutes || 30 }) } : {}) });
         const pr = examPlanProposal(ev);
         return { changes: pr.changes, readable: pr.changes.map(c => describeChange(c).text), notes: pr.notes };
       } finally { S.date = prevDate; }
