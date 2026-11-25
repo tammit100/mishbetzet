@@ -1,3 +1,5 @@
 # Backups contain real school data - never commit them
 BU/
 *-גיבוי.json
+# Built single-file version (node tools/build.js)
+dist/
